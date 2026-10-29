@@ -152,11 +152,14 @@ def run_agent(cmd: list[str], workdir: str, timeout: int) -> subprocess.Complete
 def run_verify(command: str, workdir: str, timeout: int) -> bool:
     print(f"\n--- verify: {command} ---")
     try:
-        r = subprocess.run(command, shell=True, cwd=workdir, capture_output=True, text=True, timeout=timeout)
+        # Decode as UTF-8 explicitly: the Windows default (cp1252) fails on build
+        # tool output, which leaves stdout as None
+        r = subprocess.run(command, shell=True, cwd=workdir, capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", timeout=timeout)
     except subprocess.TimeoutExpired:
         print(f"verify: TIMEOUT after {timeout}s")
         return False
-    output = tail(r.stdout + "\n" + r.stderr)
+    output = tail((r.stdout or "") + "\n" + (r.stderr or ""))
     if output:
         print(output)
     print(f"verify: {'PASS' if r.returncode == 0 else f'FAIL (exit {r.returncode})'}")
@@ -164,6 +167,11 @@ def run_verify(command: str, workdir: str, timeout: int) -> bool:
 
 
 def main() -> None:
+    # Agent output contains non-ASCII (e.g. arrows); the Windows console default
+    # (cp1252) would raise UnicodeEncodeError when printing it
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
     ap = argparse.ArgumentParser(description="Send a prompt to an external agent.")
     ap.add_argument("provider", choices=list(BINS))
     ap.add_argument("prompt", nargs="?", help="the task/prompt to send (or use --prompt-file)")
