@@ -21,25 +21,68 @@ Exit codes:
   3  silent failure: agent exited 0 with no output and no file changes,
      or --expect-changes was given and nothing changed
   4  --verify command failed
+  5  agent hit a quota/billing/auth limit with no file changes
   124 agent timed out
 """
 import argparse
+import datetime
+import fnmatch
 import hashlib
+import json
 import os
 import shutil
 import subprocess
+import tempfile
+import time
 import sys
 
 BINS = {"agy": "agy", "pi": "pi", "opencode": "opencode"}
 
 # Directories never worth snapshotting (VCS, deps, caches, agent state)
 SKIP_DIRS = {".git", ".hg", ".svn", "node_modules", "__pycache__", ".venv", "venv",
-             ".pi", ".pi-lens-probe-home", ".opencode", ".playwright-mcp", ".next", "dist", "build", ".cache"}
+             ".pi", ".pi-lens-probe-home", ".opencode", ".playwright-mcp", ".next", "dist", "build", ".cache",
+             ".wrangler", ".turbo", ".vite", ".parcel-cache", ".ruff_cache", ".pytest_cache",
+             ".mypy_cache", "coverage"}
+# Suffixes never worth snapshotting (TS build info, SQLite WAL/SHM, logs)
+SKIP_FILE_SUFFIXES = (".tsbuildinfo", "-wal", "-shm", ".log")
 MAX_FILES = 20000
 MAX_HASH_BYTES = 50 * 1024 * 1024
 
+# Specific error phrases only: bare words like "quota" or "billing" also appear in
+# normal agent summaries (e.g. work on a billing/finance feature) and would
+# misreport a successful analysis-only run as a quota failure.
+QUOTA_PATTERNS = (
+    "usage limit reached",
+    "rate limit exceeded",
+    "rate limit reached",
+    "too many requests",
+    "quota exceeded",
+    "exceeded your quota",
+    "exceeded your current quota",
+    "insufficient credits",
+    "insufficient_quota",
+    "check your billing",
+    "billing hard limit",
+    "payment required",
+    "401 unauthorized",
+    "invalid api key",
+    "not logged in",
+    "please log in",
+    "authentication failed",
+)
 
-def build_cmd(provider: str, prompt: str, args: argparse.Namespace) -> list[str]:
+STATE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "state")
+LOGS_DIR = os.path.join(STATE_DIR, "logs")
+MAX_LOG_FILES = 50
+
+
+ATTACHED_PROMPT_MESSAGE = "Your full task is in the attached file. Read all of it and follow it exactly."
+
+
+def build_cmd(provider: str, prompt: str, args: argparse.Namespace,
+              prompt_path: str | None = None) -> list[str]:
+    """prompt_path: when set (pi/opencode only), the prompt is attached as a file
+    instead of passed as an argument."""
     if provider == "agy":
         cmd = ["agy", "-p", prompt]
         if args.model:
@@ -60,9 +103,12 @@ def build_cmd(provider: str, prompt: str, args: argparse.Namespace) -> list[str]
             cmd += ["--format", "json"]
         if args.auto:
             cmd += ["--auto"]
-        cmd += ["--", prompt]
+        if prompt_path:
+            cmd += ["--file", prompt_path, "--", ATTACHED_PROMPT_MESSAGE]
+        else:
+            cmd += ["--", prompt]
     else:  # pi
-        cmd = ["pi", "-p", prompt]
+        cmd = ["pi", "-p"]
         if args.model:
             cmd += ["--model", args.model]
         if args.api_provider:
@@ -73,6 +119,7 @@ def build_cmd(provider: str, prompt: str, args: argparse.Namespace) -> list[str]
             cmd += ["--approve"]
         if args.no_session:
             cmd += ["--no-session"]
+        cmd += [f"@{prompt_path}", ATTACHED_PROMPT_MESSAGE] if prompt_path else [prompt]
     return cmd
 
 
@@ -86,16 +133,77 @@ def file_digest(path: str, size: int) -> str:
     return h.hexdigest()
 
 
-def snapshot(root: str) -> dict[str, tuple[int, int, str]] | None:
+def find_quota_error(text: str) -> str | None:
+    """Return the (trimmed) line whose text indicates a quota/billing/auth failure, or None."""
+    if not text:
+        return None
+    low = text.lower()
+    for pat in QUOTA_PATTERNS:
+        idx = low.find(pat)
+        if idx != -1:
+            start = low.rfind("\n", 0, idx) + 1
+            end = low.find("\n", idx)
+            if end == -1:
+                end = len(text)
+            return text[start:end].strip()
+    return None
+
+def init_log(provider: str, cmd: list[str], workdir: str,
+             prompt_path: str | None, prompt: str) -> str:
+    os.makedirs(LOGS_DIR, exist_ok=True)
+    ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    path = os.path.join(LOGS_DIR, f"{ts}-{provider}.log")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(f"argv: {json.dumps(cmd)}\n")
+        f.write(f"workdir: {workdir}\n")
+        f.write(f"prompt_attached: {'yes' if prompt_path else 'no'}\n")
+        if prompt_path:
+            f.write(f"prompt_path: {prompt_path}\n")
+        f.write("--- prompt ---\n")
+        f.write(prompt)
+        f.write("\n--- end prompt ---\n")
+    retain_logs()
+    return path
+
+def append_log(path: str, exit_code: int, duration: float,
+               changes: dict[str, list[str]] | None, combined: str) -> None:
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(f"\nexit_code: {exit_code}\n")
+        f.write(f"duration_s: {duration:.1f}\n")
+        if changes is not None:
+            for kind in ("created", "modified", "deleted"):
+                if changes[kind]:
+                    f.write(f"{kind}: {', '.join(changes[kind])}\n")
+        f.write("\n--- output (last 200 lines) ---\n")
+        f.write(tail(combined, 200))
+        f.write("\n")
+
+def retain_logs() -> None:
+    try:
+        logs = sorted((os.path.join(LOGS_DIR, n) for n in os.listdir(LOGS_DIR) if n.endswith(".log")),
+                      key=os.path.getmtime)
+        for old in logs[:-MAX_LOG_FILES]:
+            os.remove(old)
+    except OSError:
+        pass
+
+def snapshot(root: str, ignores=()) -> dict[str, tuple[int, int, str]] | None:
     """Map relative path -> (size, mtime_ns, sha1). None if the tree is too large."""
     snap = {}
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
         for name in filenames:
+            if any(name.endswith(suf) for suf in SKIP_FILE_SUFFIXES):
+                continue
             full = os.path.join(dirpath, name)
+            rel = os.path.relpath(full, root)
+            if ignores:
+                rel_fwd = rel.replace(os.sep, "/")
+                if any(fnmatch.fnmatch(rel_fwd, pat) for pat in ignores):
+                    continue
             try:
                 st = os.stat(full)
-                snap[os.path.relpath(full, root)] = (st.st_size, st.st_mtime_ns, file_digest(full, st.st_size))
+                snap[rel] = (st.st_size, st.st_mtime_ns, file_digest(full, st.st_size))
             except OSError:
                 continue
             if len(snap) > MAX_FILES:
@@ -110,9 +218,11 @@ def diff_snapshots(before, after) -> dict[str, list[str]]:
     return {"created": created, "modified": modified, "deleted": deleted}
 
 
-def print_report(changes, workdir: str) -> None:
+def print_report(changes, workdir: str, log_path: str | None = None) -> None:
     print("\n--- orchestra report ---")
     print(f"workdir: {workdir}")
+    if log_path:
+        print(f"log: {log_path}")
     if changes is None:
         print("file changes: not tracked (workdir too large)")
         return
@@ -131,7 +241,8 @@ def tail(text: str, lines: int = 40) -> str:
 
 def run_agent(cmd: list[str], workdir: str, timeout: int) -> subprocess.CompletedProcess:
     """Run the agent; on timeout kill its whole process tree (cmd /c wrappers leave grandchildren
-    holding the output pipes, which would otherwise hang us forever)."""
+    holding the output pipes, which would otherwise hang us forever). Returns a CompletedProcess
+    with returncode 124 on timeout (outputs are best-effort)."""
     # Some agents (opencode) resolve their project dir from $PWD, which is inherited from the caller's shell
     env = {**os.environ, "PWD": workdir}
     proc = subprocess.Popen(cmd, cwd=workdir, env=env, stdin=subprocess.DEVNULL,
@@ -139,13 +250,16 @@ def run_agent(cmd: list[str], workdir: str, timeout: int) -> subprocess.Complete
                             text=True, encoding="utf-8", errors="replace")
     try:
         out, err = proc.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as e:
         if os.name == "nt":
             subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True)
         else:
             proc.kill()
-        proc.communicate()
-        raise
+        try:
+            out, err = proc.communicate()
+        except Exception:
+            out, err = e.stdout or "", e.stderr or ""
+        return subprocess.CompletedProcess(cmd, 124, out, err)
     return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
 
 
@@ -200,6 +314,8 @@ def main() -> None:
                     help="fail with exit 3 if the agent changed no files (use for build/edit tasks)")
     ap.add_argument("--verify", help="shell command run in --workdir after the agent; exit 4 if it fails")
     ap.add_argument("--timeout", type=int, default=600, help="seconds")
+    ap.add_argument("--ignore", action="append", default=[],
+                    help="extra glob (fnmatch, workdir-relative with forward slashes) to ignore in the change report; repeatable")
     args = ap.parse_args()
 
     if args.prompt_file:
@@ -216,23 +332,43 @@ def main() -> None:
     if not binary:
         sys.exit(f"error: {args.provider} not found in PATH")
 
-    cmd = build_cmd(args.provider, args.prompt, args)
-    # On Windows, pi/opencode are npm shell scripts; run their .cmd wrapper via cmd /c.
-    if os.name == "nt" and args.provider in ("pi", "opencode"):
+    # On Windows, pi/opencode are npm shell scripts run via `cmd /c`, and cmd.exe
+    # cuts an argument at its first newline - a multi-line prompt would arrive as
+    # its first line only. Attach such prompts as a file instead.
+    prompt_path = None
+    uses_cmd_wrapper = os.name == "nt" and args.provider in ("pi", "opencode")
+    if uses_cmd_wrapper and "\n" in args.prompt:
+        if args.prompt_file:
+            prompt_path = os.path.abspath(args.prompt_file)
+        else:
+            fd, prompt_path = tempfile.mkstemp(prefix="orchestra-prompt-", suffix=".md")
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(args.prompt)
+
+    cmd = build_cmd(args.provider, args.prompt, args, prompt_path)
+    if uses_cmd_wrapper:
         cmd_wrap = shutil.which(f"{BINS[args.provider]}.cmd") or BINS[args.provider]
         cmd = ["cmd", "/c", cmd_wrap] + cmd[1:]
 
-    before = snapshot(workdir)
-    try:
-        r = run_agent(cmd, workdir, args.timeout)
-    except subprocess.TimeoutExpired:
-        print(f"error: {args.provider} timed out after {args.timeout}s", file=sys.stderr)
-        after = snapshot(workdir)
-        print_report(diff_snapshots(before, after) if before is not None and after is not None else None, workdir)
-        sys.exit(124)
-    after = snapshot(workdir)
+    start = time.time()
+    log_path = init_log(args.provider, cmd, workdir, prompt_path, args.prompt)
+
+    before = snapshot(workdir, args.ignore)
+    r = run_agent(cmd, workdir, args.timeout)
+    after = snapshot(workdir, args.ignore)
     changes = diff_snapshots(before, after) if before is not None and after is not None else None
     changed = changes is None or any(changes.values())
+
+    combined = (r.stdout or "") + "\n" + (r.stderr or "")
+    append_log(log_path, r.returncode, time.time() - start, changes, combined)
+
+    quota_err = find_quota_error(combined)
+    if quota_err:
+        if not changed:
+            print(f"error: {args.provider} hit a quota/billing/auth limit: {quota_err}", file=sys.stderr)
+            sys.exit(5)
+        print(f"warning: {args.provider} reported a possible quota/billing/auth issue but changed files; continuing: {quota_err}",
+              file=sys.stderr)
 
     out = r.stdout.strip()
     err = r.stderr.strip()
@@ -241,8 +377,11 @@ def main() -> None:
     # stderr is shown on failure, and also when stdout is empty (otherwise a silent failure leaves no clue)
     if err and (r.returncode != 0 or not out):
         print(tail(err), file=sys.stderr)
-    print_report(changes, workdir)
+    print_report(changes, workdir, log_path)
 
+    if r.returncode == 124:
+        print(f"error: {args.provider} timed out after {args.timeout}s", file=sys.stderr)
+        sys.exit(124)
     if r.returncode != 0:
         sys.exit(r.returncode)
     if not out and not changed:
