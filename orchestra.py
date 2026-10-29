@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-"""Orchestra bridge: send prompts to external agents (agy/pi) from Claude.
+"""Orchestra bridge: send prompts to external agents (agy/pi/opencode) from Claude.
 
-Both CLIs support non-interactive print mode:
-  agy: agy -p "<prompt>"  (Google Antigravity CLI)
-  pi:  pi  -p "<prompt>"  (Pi agent harness)
+All CLIs support a non-interactive mode:
+  agy:      agy -p "<prompt>"          (Google Antigravity CLI)
+  pi:       pi  -p "<prompt>"          (Pi agent harness)
+  opencode: opencode run "<prompt>"    (OpenCode)
 
 Usage:
   python orchestra.py agy "build feature X" [--exec-mode auto] [--effort high] [--dangerous]
   python orchestra.py pi  "build feature X" [--model anthropic/sonnet] [--output json] [--approve] [--no-session]
+  python orchestra.py opencode "build feature X" [--model provider/model] [--agent build] [--output json] [--auto]
   python orchestra.py pi  --prompt-file task.txt --workdir ./proj --expect-changes --verify "node --check app.js"
 
 After every run a report lists the files the agent created/modified/deleted in --workdir,
@@ -28,11 +30,11 @@ import shutil
 import subprocess
 import sys
 
-BINS = {"agy": "agy", "pi": "pi"}
+BINS = {"agy": "agy", "pi": "pi", "opencode": "opencode"}
 
 # Directories never worth snapshotting (VCS, deps, caches, agent state)
 SKIP_DIRS = {".git", ".hg", ".svn", "node_modules", "__pycache__", ".venv", "venv",
-             ".pi", ".playwright-mcp", ".next", "dist", "build", ".cache"}
+             ".pi", ".pi-lens-probe-home", ".opencode", ".playwright-mcp", ".next", "dist", "build", ".cache"}
 MAX_FILES = 20000
 MAX_HASH_BYTES = 50 * 1024 * 1024
 
@@ -48,6 +50,17 @@ def build_cmd(provider: str, prompt: str, args: argparse.Namespace) -> list[str]
             cmd += ["--mode", args.exec_mode]
         if args.dangerous:
             cmd += ["--dangerously-skip-permissions"]
+    elif provider == "opencode":
+        cmd = ["opencode", "run"]
+        if args.model:
+            cmd += ["--model", args.model]
+        # "orchestra" agent (~/.config/opencode/agents/orchestra.md): file edits allowed, no shell
+        cmd += ["--agent", args.agent or "orchestra"]
+        if args.output == "json":
+            cmd += ["--format", "json"]
+        if args.auto:
+            cmd += ["--auto"]
+        cmd += ["--", prompt]
     else:  # pi
         cmd = ["pi", "-p", prompt]
         if args.model:
@@ -116,6 +129,26 @@ def tail(text: str, lines: int = 40) -> str:
     return "\n".join(text.strip().splitlines()[-lines:])
 
 
+def run_agent(cmd: list[str], workdir: str, timeout: int) -> subprocess.CompletedProcess:
+    """Run the agent; on timeout kill its whole process tree (cmd /c wrappers leave grandchildren
+    holding the output pipes, which would otherwise hang us forever)."""
+    # Some agents (opencode) resolve their project dir from $PWD, which is inherited from the caller's shell
+    env = {**os.environ, "PWD": workdir}
+    proc = subprocess.Popen(cmd, cwd=workdir, env=env, stdin=subprocess.DEVNULL,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            text=True, encoding="utf-8", errors="replace")
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True)
+        else:
+            proc.kill()
+        proc.communicate()
+        raise
+    return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
+
+
 def run_verify(command: str, workdir: str, timeout: int) -> bool:
     print(f"\n--- verify: {command} ---")
     try:
@@ -132,10 +165,10 @@ def run_verify(command: str, workdir: str, timeout: int) -> bool:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="Send a prompt to an external agent.")
-    ap.add_argument("provider", choices=["agy", "pi"])
+    ap.add_argument("provider", choices=list(BINS))
     ap.add_argument("prompt", nargs="?", help="the task/prompt to send (or use --prompt-file)")
     ap.add_argument("--prompt-file", help="read the prompt from this file (avoids shell quoting/length limits)")
-    ap.add_argument("--model", help="model id/pattern (both)")
+    ap.add_argument("--model", help="model id/pattern (all; opencode uses provider/model)")
     ap.add_argument("--provider", dest="api_provider",
                     help="pi only: provider name for --model")
     ap.add_argument("--effort", choices=["low", "medium", "high", "xhigh", "max"],
@@ -143,11 +176,14 @@ def main() -> None:
     ap.add_argument("--exec-mode", choices=["accept-edits", "auto", "plan"],
                     help="agy only: execution mode")
     ap.add_argument("--output", choices=["text", "json"],
-                    help="pi only: output format")
+                    help="pi/opencode: output format")
     ap.add_argument("--dangerous", action="store_true",
                     help="agy only: auto-approve all tool permissions")
     ap.add_argument("--approve", action="store_true",
                     help="pi only: trust project-local files")
+    ap.add_argument("--auto", action="store_true",
+                    help="opencode only: auto-approve permissions that are not explicitly denied")
+    ap.add_argument("--agent", help="opencode only: agent to use (default: orchestra)")
     ap.add_argument("--no-session", action="store_true",
                     help="pi only: don't save session (ephemeral)")
     ap.add_argument("--workdir", default=os.getcwd(),
@@ -172,19 +208,15 @@ def main() -> None:
     if not binary:
         sys.exit(f"error: {args.provider} not found in PATH")
 
-    # On Windows, pi is a POSIX shell script; run its .cmd wrapper via cmd /c.
-    if os.name == "nt" and args.provider == "pi":
-        cmd_wrap = shutil.which("pi.cmd")
-        if cmd_wrap:
-            cmd = ["cmd", "/c", cmd_wrap] + build_cmd("pi", args.prompt, args)[1:]
-        else:
-            cmd = ["cmd", "/c", "pi"] + build_cmd("pi", args.prompt, args)[1:]
-    else:
-        cmd = build_cmd(args.provider, args.prompt, args)
+    cmd = build_cmd(args.provider, args.prompt, args)
+    # On Windows, pi/opencode are npm shell scripts; run their .cmd wrapper via cmd /c.
+    if os.name == "nt" and args.provider in ("pi", "opencode"):
+        cmd_wrap = shutil.which(f"{BINS[args.provider]}.cmd") or BINS[args.provider]
+        cmd = ["cmd", "/c", cmd_wrap] + cmd[1:]
 
     before = snapshot(workdir)
     try:
-        r = subprocess.run(cmd, cwd=workdir, capture_output=True, text=True, timeout=args.timeout)
+        r = run_agent(cmd, workdir, args.timeout)
     except subprocess.TimeoutExpired:
         print(f"error: {args.provider} timed out after {args.timeout}s", file=sys.stderr)
         after = snapshot(workdir)
