@@ -1,12 +1,18 @@
 #!/usr/bin/env python3
-"""Orchestra bridge: send prompts to external agents (agy/pi/opencode) from Claude.
+"""Orchestra bridge: send prompts to external agents (claude/agy/pi/opencode).
 
 All CLIs support a non-interactive mode:
   agy:      agy -p "<prompt>"          (Google Antigravity CLI)
   pi:       pi  -p "<prompt>"          (Pi agent harness)
   opencode: opencode run "<prompt>"    (OpenCode)
+  claude:   claude -p                  (Claude Code; prompt sent on stdin)
+
+An agent can never delegate to itself: the calling agent, and every agent earlier in a
+delegation chain, is left out of `providers` and refused with exit 6.
 
 Usage:
+  python orchestra.py providers
+  python orchestra.py claude "build feature X" [--model sonnet] [--effort high] [--exec-mode plan] [--output json]
   python orchestra.py agy "build feature X" [--exec-mode auto] [--effort high] [--dangerous]
   python orchestra.py pi  "build feature X" [--model anthropic/sonnet] [--output json] [--approve] [--no-session]
   python orchestra.py opencode "build feature X" [--model provider/model] [--agent build] [--output json] [--auto]
@@ -22,6 +28,7 @@ Exit codes:
      or --expect-changes was given and nothing changed
   4  --verify command failed
   5  agent hit a quota/billing/auth limit with no file changes
+  6  refused: the provider is the calling agent or already in the delegation chain
   124 agent timed out
 """
 import argparse
@@ -36,7 +43,15 @@ import tempfile
 import time
 import sys
 
-BINS = {"agy": "agy", "pi": "pi", "opencode": "opencode"}
+BINS = {"claude": "claude", "agy": "agy", "pi": "pi", "opencode": "opencode"}
+
+# Variable each CLI sets for the commands it runs; used to recognise the calling agent
+CALLER_MARKERS = {"claude": "CLAUDECODE", "agy": "ANTIGRAVITY_AGENT",
+                  "pi": "PI_CODING_AGENT", "opencode": "OPENCODE"}
+# Comma-separated agents already in this delegation, passed down to each delegated agent
+CHAIN_ENV = "ORCHESTRA_CHAIN"
+# Claude's names for --exec-mode. It needs acceptEdits to write files in print mode.
+CLAUDE_MODES = {"accept-edits": "acceptEdits", "auto": "auto", "plan": "plan"}
 
 # Directories never worth snapshotting (VCS, deps, caches, agent state)
 SKIP_DIRS = {".git", ".hg", ".svn", "node_modules", "__pycache__", ".venv", "venv",
@@ -83,7 +98,15 @@ def build_cmd(provider: str, prompt: str, args: argparse.Namespace,
               prompt_path: str | None = None) -> list[str]:
     """prompt_path: when set (pi/opencode only), the prompt is attached as a file
     instead of passed as an argument."""
-    if provider == "agy":
+    if provider == "claude":  # the prompt goes on stdin
+        cmd = ["claude", "-p", "--permission-mode", CLAUDE_MODES[args.exec_mode or "accept-edits"]]
+        if args.model:
+            cmd += ["--model", args.model]
+        if args.effort:
+            cmd += ["--effort", args.effort]
+        if args.output:
+            cmd += ["--output-format", args.output]
+    elif provider == "agy":
         cmd = ["agy", "-p", prompt]
         if args.model:
             cmd += ["--model", args.model]
@@ -121,6 +144,28 @@ def build_cmd(provider: str, prompt: str, args: argparse.Namespace,
             cmd += ["--no-session"]
         cmd += [f"@{prompt_path}", ATTACHED_PROMPT_MESSAGE] if prompt_path else [prompt]
     return cmd
+
+
+def find_callers(explicit: str | None) -> list[str]:
+    """Agents that must not be delegated to: the delegation chain, plus the calling agent.
+    --caller replaces detection from the environment, not the chain."""
+    callers = [c for c in os.environ.get(CHAIN_ENV, "").split(",") if c]
+    if explicit:
+        callers.append(explicit)
+    else:
+        callers += [name for name, var in CALLER_MARKERS.items() if os.environ.get(var)]
+    return list(dict.fromkeys(callers))
+
+
+def print_providers(callers: list[str]) -> None:
+    excluded = [p for p in BINS if p in callers]
+    available = [p for p in BINS if p not in callers and shutil.which(BINS[p])]
+    missing = [p for p in BINS if p not in callers and not shutil.which(BINS[p])]
+    print(f"available: {', '.join(available) or '(none)'}")
+    if excluded:
+        print(f"excluded (calling agent or delegation chain): {', '.join(excluded)}")
+    if missing:
+        print(f"not installed: {', '.join(missing)}")
 
 
 def file_digest(path: str, size: int) -> str:
@@ -239,17 +284,19 @@ def tail(text: str, lines: int = 40) -> str:
     return "\n".join(text.strip().splitlines()[-lines:])
 
 
-def run_agent(cmd: list[str], workdir: str, timeout: int) -> subprocess.CompletedProcess:
+def run_agent(cmd: list[str], workdir: str, timeout: int, callers: list[str], provider: str,
+              stdin_text: str | None = None) -> subprocess.CompletedProcess:
     """Run the agent; on timeout kill its whole process tree (cmd /c wrappers leave grandchildren
     holding the output pipes, which would otherwise hang us forever). Returns a CompletedProcess
     with returncode 124 on timeout (outputs are best-effort)."""
     # Some agents (opencode) resolve their project dir from $PWD, which is inherited from the caller's shell
-    env = {**os.environ, "PWD": workdir}
-    proc = subprocess.Popen(cmd, cwd=workdir, env=env, stdin=subprocess.DEVNULL,
+    env = {**os.environ, "PWD": workdir, CHAIN_ENV: ",".join([*callers, provider])}
+    proc = subprocess.Popen(cmd, cwd=workdir, env=env,
+                            stdin=subprocess.DEVNULL if stdin_text is None else subprocess.PIPE,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             text=True, encoding="utf-8", errors="replace")
     try:
-        out, err = proc.communicate(timeout=timeout)
+        out, err = proc.communicate(input=stdin_text, timeout=timeout)
     except subprocess.TimeoutExpired as e:
         if os.name == "nt":
             subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True)
@@ -287,18 +334,19 @@ def main() -> None:
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8", errors="replace")
     ap = argparse.ArgumentParser(description="Send a prompt to an external agent.")
-    ap.add_argument("provider", choices=list(BINS))
+    ap.add_argument("provider", choices=[*BINS, "providers"],
+                    help="agent to run, or 'providers' to list the agents you can delegate to")
     ap.add_argument("prompt", nargs="?", help="the task/prompt to send (or use --prompt-file)")
     ap.add_argument("--prompt-file", help="read the prompt from this file (avoids shell quoting/length limits)")
     ap.add_argument("--model", help="model id/pattern (all; opencode uses provider/model)")
     ap.add_argument("--provider", dest="api_provider",
                     help="pi only: provider name for --model")
     ap.add_argument("--effort", choices=["low", "medium", "high", "xhigh", "max"],
-                    help="agy only: reasoning effort")
+                    help="claude/agy: reasoning effort")
     ap.add_argument("--exec-mode", choices=["accept-edits", "auto", "plan"],
-                    help="agy only: execution mode")
+                    help="claude/agy: execution mode (claude default: accept-edits)")
     ap.add_argument("--output", choices=["text", "json"],
-                    help="pi/opencode: output format")
+                    help="claude/pi/opencode: output format")
     ap.add_argument("--dangerous", action="store_true",
                     help="agy only: auto-approve all tool permissions")
     ap.add_argument("--approve", action="store_true",
@@ -308,6 +356,8 @@ def main() -> None:
     ap.add_argument("--agent", help="opencode only: agent to use (default: orchestra)")
     ap.add_argument("--no-session", action="store_true",
                     help="pi only: don't save session (ephemeral)")
+    ap.add_argument("--caller",
+                    help="name of the calling agent, replacing detection from the environment")
     ap.add_argument("--workdir", default=os.getcwd(),
                     help="directory the agent runs in and whose file changes are reported (default: cwd)")
     ap.add_argument("--expect-changes", action="store_true",
@@ -317,6 +367,16 @@ def main() -> None:
     ap.add_argument("--ignore", action="append", default=[],
                     help="extra glob (fnmatch, workdir-relative with forward slashes) to ignore in the change report; repeatable")
     args = ap.parse_args()
+
+    callers = find_callers(args.caller)
+    if args.provider == "providers":
+        print_providers(callers)
+        sys.exit(0)
+    if args.provider in callers:
+        print(f"error: {args.provider} cannot be delegated to: it is the calling agent or already "
+              f"in the delegation chain ({', '.join(callers)}).", file=sys.stderr)
+        print_providers(callers)
+        sys.exit(6)
 
     if args.prompt_file:
         with open(args.prompt_file, encoding="utf-8") as f:
@@ -336,8 +396,8 @@ def main() -> None:
     # cuts an argument at its first newline - a multi-line prompt would arrive as
     # its first line only. Attach such prompts as a file instead.
     prompt_path = None
-    uses_cmd_wrapper = os.name == "nt" and args.provider in ("pi", "opencode")
-    if uses_cmd_wrapper and "\n" in args.prompt:
+    uses_cmd_wrapper = os.name == "nt" and args.provider in ("claude", "pi", "opencode")
+    if uses_cmd_wrapper and args.provider != "claude" and "\n" in args.prompt:
         if args.prompt_file:
             prompt_path = os.path.abspath(args.prompt_file)
         else:
@@ -354,7 +414,8 @@ def main() -> None:
     log_path = init_log(args.provider, cmd, workdir, prompt_path, args.prompt)
 
     before = snapshot(workdir, args.ignore)
-    r = run_agent(cmd, workdir, args.timeout)
+    r = run_agent(cmd, workdir, args.timeout, callers, args.provider,
+                  args.prompt if args.provider == "claude" else None)
     after = snapshot(workdir, args.ignore)
     changes = diff_snapshots(before, after) if before is not None and after is not None else None
     changed = changes is None or any(changes.values())
