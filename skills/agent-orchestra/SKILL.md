@@ -7,7 +7,7 @@ description: Bridge to external coding agents claude (Claude Code), agy (Google 
 
 Send prompts to external CLI agents from any agent that can run shell commands. All run non-interactively and return stdout as the result.
 
-**Never delegate to yourself.** Before delegating, run `python orchestra.py providers` and choose only from `available`. Never offer the user an agent it leaves out. The calling agent and every agent earlier in the delegation chain are excluded, and running one exits 6. If none is available, do the work yourself and say why. Don't use `--caller` to get around an exclusion; it exists for when detection names the wrong agent.
+**Never delegate to yourself.** Before delegating, run `{{PYTHON}} orchestra.py providers` and choose only from `available`. Never offer the user an agent it leaves out. The calling agent and every agent earlier in the delegation chain are excluded, and running one exits 6. If none is available, do the work yourself and say why. Don't use `--caller` to get around an exclusion; it exists for when detection names the wrong agent.
 
 ## Script
 
@@ -16,11 +16,11 @@ Send prompts to external CLI agents from any agent that can run shell commands. 
 ## Usage
 
 ```
-python orchestra.py providers
-python orchestra.py claude "<prompt>" [--model <name>] [--effort high] [--exec-mode plan] [--output json]
-python orchestra.py agy "<prompt>" [--exec-mode auto] [--effort high] [--dangerous]
-python orchestra.py pi  "<prompt>" [--model <pattern>] [--output json] [--approve] [--no-session]
-python orchestra.py opencode "<prompt>" [--model provider/model] [--agent <name>] [--output json]
+{{PYTHON}} orchestra.py providers
+{{PYTHON}} orchestra.py claude "<prompt>" [--model <name>] [--effort high] [--exec-mode plan] [--output json]
+{{PYTHON}} orchestra.py agy "<prompt>" [--exec-mode auto] [--effort high] [--dangerous]
+{{PYTHON}} orchestra.py pi  "<prompt>" [--model <pattern>] [--output json] [--approve] [--no-session]
+{{PYTHON}} orchestra.py opencode "<prompt>" [--model provider/model] [--agent <name>] [--output json]
 
 # common to all
   --prompt-file <path>   read the prompt from a file (prefer this for long prompts)
@@ -60,7 +60,7 @@ Each run writes a log under `{{LOGS_DIR}}` as `<YYYYmmdd-HHMMSS>-<provider>.log`
 
 ## Workflow: build + QC
 
-1. Write the task to a file and delegate: `python orchestra.py <agent> --prompt-file task.txt --workdir <project> --expect-changes --verify "<test/lint/syntax check>"`.
+1. Write the task to a file and delegate: `{{PYTHON}} orchestra.py <agent> --prompt-file task.txt --workdir <project> --expect-changes --verify "<test/lint/syntax check>"`.
 2. Trust the report and exit code, not the agent's own claims of success. Exit 3 → check mode/permissions or try the other agent; exit 4 → read the verify output.
 3. Read the changed files listed in the report yourself as QC, against the spec.
 4. Present the best result to the user.

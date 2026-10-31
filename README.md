@@ -35,6 +35,8 @@ git clone https://github.com/fornubi/agent-orchestra.git
 cd agent-orchestra
 ```
 
+Examples use `python`. Where that command is missing, as on many macOS and Linux systems, use `python3`.
+
 Run `orchestra.py` directly using Python 3:
 
 ```bash
@@ -62,7 +64,7 @@ python install.py
 | `~/.agents/skills/agent-orchestra/SKILL.md` | Codex, Gemini CLI, OpenCode | Always |
 | `~/.config/opencode/agents/orchestra.md` | `orchestra.py` when delegating to `opencode` | Only if `opencode` is on `PATH` |
 
-Both skill copies are generated from `skills/agent-orchestra/SKILL.md` with the path to your clone filled in. OpenCode sees both, logs a duplicate-name warning, and uses one; the copies are identical, so this is harmless.
+Both skill copies are generated from `skills/agent-orchestra/SKILL.md` with the path to your clone and the right Python command filled in. If `XDG_CONFIG_HOME` is set, the OpenCode agent goes there instead of `~/.config`. OpenCode sees both, logs a duplicate-name warning, and uses one; the copies are identical, so this is harmless.
 
 Then ask your agent to delegate, for example: *"Use agent-orchestra to have pi build this, then review it."* The calling agent only needs to support skills and run shell commands. Delegation targets are `claude`, `agy`, `pi`, and `opencode`, minus the [calling agent](#no-self-delegation).
 
@@ -114,7 +116,7 @@ These flags are available across all providers:
 | `--workdir <path>` | String | Directory where the agent runs and whose file changes are tracked (default: current directory). |
 | `--expect-changes` | Flag | Fail with exit code `3` if the agent exits without changing any files. Recommended for build and edit tasks. |
 | `--verify "<cmd>"` | String | Shell command executed in `--workdir` after the agent finishes. Exits with code `4` if this command returns non-zero. |
-| `--timeout <sec>` | Integer | Maximum execution time in seconds (default: `600`). Kills the agent on timeout (its whole process tree on Windows). |
+| `--timeout <sec>` | Integer | Maximum execution time in seconds (default: `600`). Kills the agent and its child processes on timeout. |
 | `--ignore <glob>` | String | Extra glob pattern (`fnmatch`, relative to `--workdir` with forward slashes) to exclude from change tracking. Repeatable. |
 | `--caller <name>` | String | Name of the calling agent, replacing detection from the environment. See [No Self-Delegation](#no-self-delegation). |
 | `--model <id>` | String | Model identifier passed to the underlying CLI (for `opencode`, uses `provider/model`). |
@@ -166,7 +168,7 @@ These flags are available across all providers:
 | `4` | Verification Failed | The post-run `--verify "<cmd>"` command failed (non-zero exit code or verification timeout). |
 | `5` | Quota / Auth Limit | Output matched a known quota, billing, rate-limit, or authentication error phrase with no file changes. |
 | `6` | Refused | The provider is the calling agent or already in the delegation chain. The agent was not started. |
-| `124` | Timeout | Execution exceeded `--timeout` seconds and the agent was killed. |
+| `124` | Timeout | Execution exceeded `--timeout` seconds. The agent and its child processes were killed. |
 
 > **Note on Quota Detection**: If a quota or billing phrase appears in the agent's output but files *did* change on disk, `orchestra` prints a warning to `stderr` and allows normal exit code evaluation to continue.
 
@@ -224,7 +226,7 @@ file changes: NONE
 
 ### Run Logs
 
-Each run writes a persistent log to `state/logs/<YYYYmmdd-HHMMSS>-<provider>.log` relative to `orchestra.py`. The log records:
+Each run writes a persistent log to `state/logs/<YYYYmmdd-HHMMSS>-<provider>.log` relative to `orchestra.py`. Runs of the same provider started in the same second get a numeric suffix (`-1`, `-2`, ...), so parallel runs keep separate logs. The log records:
 
 - Full command line invocation (`argv`)
 - Target working directory (`workdir`)
@@ -260,7 +262,7 @@ When integrating coding agents into automated workflows, shell scripts, or super
 - **Antigravity (`agy`) `accept-edits` Mode**: `agy --exec-mode accept-edits` has been observed to do nothing when a task needs new files created.
 - **Python Version**: Python 3.10+ is required due to modern union type annotations (`str | None`).
 - **Windows Multi-Line Prompts**: On Windows, `cmd.exe` truncates command arguments at the first newline character. When invoking `pi` or `opencode` with multi-line prompts on Windows (`claude` receives its prompt on stdin instead), `orchestra` automatically writes the prompt to a temporary file and attaches it via `--file` or `@file`.
-- **Process Tree Cleanup**: On Windows, child processes spawned by agent wrappers can keep standard I/O pipes open after a timeout. On timeout, `orchestra` executes `taskkill /PID <pid> /T /F` to terminate the entire process tree. On other platforms only the agent process itself is killed.
+- **Process Tree Cleanup**: On Windows, child processes spawned by agent wrappers can keep standard I/O pipes open after a timeout. On timeout, `orchestra` executes `taskkill /PID <pid> /T /F` to terminate the entire process tree. On macOS and Linux, the agent runs in its own process group and that whole group is killed.
 
 ## License
 

@@ -38,6 +38,7 @@ import hashlib
 import json
 import os
 import shutil
+import signal
 import subprocess
 import tempfile
 import time
@@ -62,6 +63,7 @@ SKIP_DIRS = {".git", ".hg", ".svn", "node_modules", "__pycache__", ".venv", "ven
 SKIP_FILE_SUFFIXES = (".tsbuildinfo", "-wal", "-shm", ".log")
 MAX_FILES = 20000
 MAX_HASH_BYTES = 50 * 1024 * 1024
+KILL_GRACE_SECONDS = 5
 
 # Specific error phrases only: bare words like "quota" or "billing" also appear in
 # normal agent summaries (e.g. work on a billing/finance feature) and would
@@ -197,8 +199,17 @@ def init_log(provider: str, cmd: list[str], workdir: str,
              prompt_path: str | None, prompt: str) -> str:
     os.makedirs(LOGS_DIR, exist_ok=True)
     ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-    path = os.path.join(LOGS_DIR, f"{ts}-{provider}.log")
-    with open(path, "w", encoding="utf-8") as f:
+    # Exclusive create, so runs started in the same second (e.g. in parallel) keep separate logs
+    n = 0
+    while True:
+        suffix = f"-{n}" if n else ""
+        path = os.path.join(LOGS_DIR, f"{ts}-{provider}{suffix}.log")
+        try:
+            f = open(path, "x", encoding="utf-8")
+            break
+        except FileExistsError:
+            n += 1
+    with f:
         f.write(f"argv: {json.dumps(cmd)}\n")
         f.write(f"workdir: {workdir}\n")
         f.write(f"prompt_attached: {'yes' if prompt_path else 'no'}\n")
@@ -286,28 +297,47 @@ def tail(text: str, lines: int = 40) -> str:
 
 def run_agent(cmd: list[str], workdir: str, timeout: int, callers: list[str], provider: str,
               stdin_text: str | None = None) -> subprocess.CompletedProcess:
-    """Run the agent; on timeout kill its whole process tree (cmd /c wrappers leave grandchildren
-    holding the output pipes, which would otherwise hang us forever). Returns a CompletedProcess
-    with returncode 124 on timeout (outputs are best-effort)."""
+    """Run the agent; on timeout kill its whole process tree (children left running would hold
+    the output pipes and hang us). Returns a CompletedProcess with returncode 124 on timeout
+    (outputs are best-effort)."""
     # Some agents (opencode) resolve their project dir from $PWD, which is inherited from the caller's shell
     env = {**os.environ, "PWD": workdir, CHAIN_ENV: ",".join([*callers, provider])}
     proc = subprocess.Popen(cmd, cwd=workdir, env=env,
                             stdin=subprocess.DEVNULL if stdin_text is None else subprocess.PIPE,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            text=True, encoding="utf-8", errors="replace")
+                            text=True, encoding="utf-8", errors="replace",
+                            # Its own process group on POSIX, so kill_tree can reach its children
+                            start_new_session=os.name != "nt")
     try:
         out, err = proc.communicate(input=stdin_text, timeout=timeout)
-    except subprocess.TimeoutExpired as e:
-        if os.name == "nt":
-            subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True)
-        else:
-            proc.kill()
+    except subprocess.TimeoutExpired:
+        kill_tree(proc)
         try:
-            out, err = proc.communicate()
-        except Exception:
-            out, err = e.stdout or "", e.stderr or ""
+            out, err = proc.communicate(timeout=KILL_GRACE_SECONDS)
+        except subprocess.TimeoutExpired as e:  # a child left the group and still holds the pipes
+            out, err = as_text(e.stdout), as_text(e.stderr)
         return subprocess.CompletedProcess(cmd, 124, out, err)
+    except BaseException:  # e.g. Ctrl+C, which no longer reaches a separate process group
+        kill_tree(proc)
+        raise
     return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
+
+
+def kill_tree(proc: subprocess.Popen) -> None:
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True)
+        return
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+
+
+def as_text(data) -> str:
+    """TimeoutExpired carries partial output as bytes on POSIX, whatever the Popen text mode."""
+    if isinstance(data, bytes):
+        return data.decode("utf-8", "replace")
+    return data or ""
 
 
 def run_verify(command: str, workdir: str, timeout: int) -> bool:
@@ -366,7 +396,8 @@ def main() -> None:
     ap.add_argument("--timeout", type=int, default=600, help="seconds")
     ap.add_argument("--ignore", action="append", default=[],
                     help="extra glob (fnmatch, workdir-relative with forward slashes) to ignore in the change report; repeatable")
-    args = ap.parse_args()
+    # Intermixed: with plain parse_args an optional positional can't come after the flags
+    args = ap.parse_intermixed_args()
 
     callers = find_callers(args.caller)
     if args.provider == "providers":

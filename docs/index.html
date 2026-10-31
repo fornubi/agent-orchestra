@@ -906,7 +906,7 @@ The issue is now completely resolved.</span>
             <div class="pipeline-content">
               <h3 class="pipeline-name">Supervised Process Run</h3>
               <p class="pipeline-desc">
-                Executes the agent non-interactively with a configurable <code>--timeout</code> (default: 600s). On Windows, timeouts trigger <code>taskkill /PID &lt;pid&gt; /T /F</code> to eliminate the entire process tree and release locked pipes.
+                Executes the agent non-interactively with a configurable <code>--timeout</code> (default: 600s). On timeout it kills the agent and its child processes: with <code>taskkill</code> on Windows, and through a process group on macOS and Linux.
               </p>
             </div>
           </div>
@@ -996,7 +996,7 @@ The issue is now completely resolved.</span>
               <tr>
                 <td><span class="code-badge code-124">124</span></td>
                 <td><strong>Timeout</strong></td>
-                <td>Execution exceeded <code>--timeout</code> seconds and the agent was killed.</td>
+                <td>Execution exceeded <code>--timeout</code> seconds. The agent and its child processes were killed.</td>
               </tr>
             </tbody>
           </table>
@@ -1014,7 +1014,7 @@ The issue is now completely resolved.</span>
         <div class="section-label">04 / Supported Providers</div>
         <h2 class="section-title">Supported Agent Engines</h2>
         <p class="section-desc">
-          Provider CLIs must be installed and authenticated separately. <code>orchestra</code> operates as an out-of-process harness over their non-interactive interfaces. An agent can never delegate to itself: <code>python orchestra.py providers</code> leaves out the caller, and running it exits 6. To delegate from Claude Code, Codex, Gemini CLI, or OpenCode, run <code>python install.py</code> in your clone to install the included skill.
+          Provider CLIs must be installed and authenticated separately. <code>orchestra</code> operates as an out-of-process harness over their non-interactive interfaces. An agent can never delegate to itself: <code>python orchestra.py providers</code> leaves out the caller, and running it exits 6. To delegate from Claude Code, Codex, Gemini CLI, or OpenCode, run <code>python install.py</code> (or <code>python3</code>) in your clone to install the included skill.
         </p>
 
         <div class="providers-list">
