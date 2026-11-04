@@ -23,7 +23,7 @@ Autonomous coding agents regularly produce convincing explanations: *"I have inv
   - `agy` (Google Antigravity CLI)
   - `pi` (Pi agent harness)
   - `opencode` (OpenCode)
-  - `qoder` (Qoder CLI)
+  - `qodercli` (Qoder CLI)
   - `kiro-cli` (Kiro CLI)
 
 > Note: `freebuff` is **not** supported because it operates solely as an interactive TUI.
@@ -158,15 +158,15 @@ These flags are available across all providers:
 | `--output <format>` | `text`, `json` | Output formatting (passes `--format json` when `json` is chosen). |
 | `--auto` | Flag | Automatically approves permissions not explicitly denied. |
 
-#### Qoder CLI (`qoder`)
+#### Qoder CLI (`qoder`, runs `qodercli`)
 
-Runs `qoder -p` (print mode). The prompt is a positional argument, or is attached with `--attachment` when it is multi-line on Windows.
+Runs `qodercli -p` (print mode). The prompt is a positional argument, or is attached with `--attachment` when it is multi-line on Windows.
 
 | Flag | Values | Description |
 |---|---|---|
-| `--exec-mode <mode>` | `accept-edits`, `auto`, `plan` | Permission mode (passed to `qoder --permission-mode`; default: `accept-edits`). `plan` maps to Qoder's `default` mode, which asks before every write, so the run analyses and plans without editing. |
-| `--effort <level>` | `low`, `medium`, `high`, `xhigh`, `max` | Reasoning effort (passed to `qoder --reasoning-effort`, which also accepts `auto`, `none`, and `ultracode`). |
-| `--output <format>` | `text`, `json` | Output formatting (passed to `qoder --output-format`, which also accepts `stream-json`). |
+| `--exec-mode <mode>` | `accept-edits`, `auto`, `plan` | Permission mode (passed to `qodercli --permission-mode`; default: `accept-edits`). `plan` maps to Qoder's `default` mode, which asks before every write, so the run analyses and plans without editing. |
+| `--effort <level>` | `low`, `medium`, `high`, `xhigh`, `max` | Reasoning effort (passed to `qodercli --reasoning-effort`, which also accepts `auto`, `none`, and `ultracode`). |
+| `--output <format>` | `text`, `json` | Output formatting (passed to `qodercli --output-format`, which also accepts `stream-json`). |
 | `--no-session` | Flag | Runs ephemerally (passes `--no-session-persistence`). |
 | `--dangerous` | Flag | Bypasses all permission checks (passes `--dangerously-skip-permissions`). |
 

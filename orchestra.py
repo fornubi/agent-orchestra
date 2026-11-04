@@ -6,7 +6,7 @@ All CLIs support a non-interactive mode:
   pi:       pi  -p "<prompt>"                      (Pi agent harness)
   opencode: opencode run "<prompt>"                (OpenCode)
   claude:   claude -p                              (Claude Code; prompt sent on stdin)
-  qoder:    qoder -p "<prompt>"                    (Qoder CLI)
+  qoder:    qodercli -p "<prompt>"                 (Qoder CLI)
   kiro-cli: kiro-cli chat --no-interactive "<prompt>"  (Kiro CLI)
 
 An agent can never delegate to itself: the calling agent, and every agent earlier in a
@@ -49,7 +49,7 @@ import time
 import sys
 
 BINS = {"claude": "claude", "agy": "agy", "pi": "pi", "opencode": "opencode",
-        "qoder": "qoder", "kiro-cli": "kiro-cli"}
+        "qoder": "qodercli", "kiro-cli": "kiro-cli"}
 
 # Variable each CLI sets for the commands it runs; used to recognise the calling agent
 CALLER_MARKERS = {"claude": "CLAUDECODE", "agy": "ANTIGRAVITY_AGENT",
@@ -145,7 +145,7 @@ def build_cmd(provider: str, prompt: str, args: argparse.Namespace,
         else:
             cmd += ["--", prompt]
     elif provider == "qoder":
-        cmd = ["qoder", "-p", "--permission-mode", QODER_MODES[args.exec_mode or "accept-edits"]]
+        cmd = ["qodercli", "-p", "--permission-mode", QODER_MODES[args.exec_mode or "accept-edits"]]
         if args.model:
             cmd += ["--model", args.model]
         if args.effort:
