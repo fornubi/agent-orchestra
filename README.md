@@ -23,6 +23,8 @@ Autonomous coding agents regularly produce convincing explanations: *"I have inv
   - `agy` (Google Antigravity CLI)
   - `pi` (Pi agent harness)
   - `opencode` (OpenCode)
+  - `qoder` (Qoder CLI)
+  - `kiro-cli` (Kiro CLI)
 
 > Note: `freebuff` is **not** supported because it operates solely as an interactive TUI.
 
@@ -66,7 +68,7 @@ python install.py
 
 Both skill copies are generated from `skills/agent-orchestra/SKILL.md` with the path to your clone and the right Python command filled in. If `XDG_CONFIG_HOME` is set, the OpenCode agent goes there instead of `~/.config`. OpenCode sees both, logs a duplicate-name warning, and uses one; the copies are identical, so this is harmless.
 
-Then ask your agent to delegate, for example: *"Use agent-orchestra to have pi build this, then review it."* The calling agent only needs to support skills and run shell commands. Delegation targets are `claude`, `agy`, `pi`, and `opencode`, minus the [calling agent](#no-self-delegation).
+Then ask your agent to delegate, for example: *"Use agent-orchestra to have pi build this, then review it."* The calling agent only needs to support skills and run shell commands. Delegation targets are `claude`, `agy`, `pi`, `opencode`, `qoder`, and `kiro-cli`, minus the [calling agent](#no-self-delegation).
 
 `orchestra.py` stays in your clone, so `git pull` updates it. An installed file that differs from the repository is left alone and the script exits `1`. Re-run with `--force` to overwrite it, which you also need after moving the clone or when the skill changes.
 
@@ -110,7 +112,7 @@ These flags are available across all providers:
 
 | Flag | Type | Description |
 |---|---|---|
-| `provider` | Positional | Target agent CLI: `claude`, `agy`, `pi`, or `opencode`; or `providers` to list the agents you can delegate to. |
+| `provider` | Positional | Target agent CLI: `claude`, `agy`, `pi`, `opencode`, `qoder`, or `kiro-cli`; or `providers` to list the agents you can delegate to. |
 | `prompt` | Positional | The task prompt (optional if `--prompt-file` is specified). |
 | `--prompt-file <path>` | String | Read the prompt from this file. Avoids shell quoting and newline limits. |
 | `--workdir <path>` | String | Directory where the agent runs and whose file changes are tracked (default: current directory). |
@@ -156,6 +158,32 @@ These flags are available across all providers:
 | `--output <format>` | `text`, `json` | Output formatting (passes `--format json` when `json` is chosen). |
 | `--auto` | Flag | Automatically approves permissions not explicitly denied. |
 
+#### Qoder CLI (`qoder`)
+
+Runs `qoder -p` (print mode). The prompt is a positional argument, or is attached with `--attachment` when it is multi-line on Windows.
+
+| Flag | Values | Description |
+|---|---|---|
+| `--exec-mode <mode>` | `accept-edits`, `auto`, `plan` | Permission mode (passed to `qoder --permission-mode`; default: `accept-edits`). `plan` maps to Qoder's `default` mode, which asks before every write, so the run analyses and plans without editing. |
+| `--effort <level>` | `low`, `medium`, `high`, `xhigh`, `max` | Reasoning effort (passed to `qoder --reasoning-effort`, which also accepts `auto`, `none`, and `ultracode`). |
+| `--output <format>` | `text`, `json` | Output formatting (passed to `qoder --output-format`, which also accepts `stream-json`). |
+| `--no-session` | Flag | Runs ephemerally (passes `--no-session-persistence`). |
+| `--dangerous` | Flag | Bypasses all permission checks (passes `--dangerously-skip-permissions`). |
+
+#### Kiro CLI (`kiro-cli`)
+
+Runs `kiro-cli chat --no-interactive`. Requires `kiro-cli login` first; check with `kiro-cli whoami`.
+
+| Flag | Values | Description |
+|---|---|---|
+| `--effort <level>` | `low`, `medium`, `high`, `xhigh`, `max` | Reasoning effort (passed to `kiro-cli --effort`). |
+| `--output <format>` | `text`, `json` | `json` passes `--output-format stream-json`, the run's ACP events as JSON Lines. |
+| `--dangerous` | Flag | Passes `--trust-all-tools`, letting Kiro run any shell command unconfirmed. Without it, only `--trust-tools fs_read,fs_write,str_replace` is granted: Kiro reads and edits files but has **no shell**, so use `--verify` to run tests. |
+
+`str_replace` is Kiro's in-place edit tool. If it is not trusted, every edit fails and Kiro falls back to rewriting whole files.
+
+Kiro prints its own `[INFO]` and `[ERROR]` startup log lines to stdout ahead of its answer.
+
 ## Exit Codes
 
 `orchestra` turns ambiguous agent states into deterministic, scriptable exit codes:
@@ -178,7 +206,7 @@ An agent can never delegate to itself. From Claude Code, `claude` is not an opti
 
 ```console
 $ python orchestra.py providers
-available: agy, pi, opencode
+available: agy, pi, opencode, kiro-cli
 excluded (calling agent or delegation chain): claude
 ```
 
@@ -186,7 +214,7 @@ Running an excluded provider exits `6` without starting it. Two sources decide w
 
 | Source | How it works |
 |---|---|
-| Calling agent | Detected from the variable each CLI sets for its commands: `CLAUDECODE`, `ANTIGRAVITY_AGENT`, `PI_CODING_AGENT`, or `OPENCODE`. |
+| Calling agent | Detected from the variable each CLI sets for its commands: `CLAUDECODE`, `ANTIGRAVITY_AGENT`, `PI_CODING_AGENT`, `OPENCODE`, `QODER_CLI`, or `KIRO_SESSION_ID`. |
 | Delegation chain | `orchestra` passes every agent in the delegation down in `ORCHESTRA_CHAIN`. If `claude` delegates to `pi`, that `pi` cannot delegate to `claude` or `pi`, which also rules out loops. |
 
 If detection is wrong, for example because a variable leaked from a parent terminal, pass `--caller <name>` to replace it. The chain still applies. This guards against mistakes, not against someone deliberately bypassing it.
@@ -261,7 +289,7 @@ When integrating coding agents into automated workflows, shell scripts, or super
 - **OpenCode Agent Requirement**: When using `opencode`, `orchestra` defaults to `--agent orchestra`. This agent must exist at `~/.config/opencode/agents/orchestra.md`. `python install.py` puts it there from `opencode/agents/orchestra.md`. It allows reading and editing files inside `--workdir` but no shell, so use `--verify` to run tests.
 - **Antigravity (`agy`) `accept-edits` Mode**: `agy --exec-mode accept-edits` has been observed to do nothing when a task needs new files created.
 - **Python Version**: Python 3.10+ is required due to modern union type annotations (`str | None`).
-- **Windows Multi-Line Prompts**: On Windows, `cmd.exe` truncates command arguments at the first newline character. When invoking `pi` or `opencode` with multi-line prompts on Windows (`claude` receives its prompt on stdin instead), `orchestra` automatically writes the prompt to a temporary file and attaches it via `--file` or `@file`.
+- **Windows Multi-Line Prompts**: On Windows, `cmd.exe` truncates command arguments at the first newline character. When invoking `pi`, `opencode`, or `qoder` with multi-line prompts on Windows (`claude` receives its prompt on stdin instead), `orchestra` automatically writes the prompt to a temporary file and attaches it via `--file`, `@file`, or `--attachment`. `kiro-cli` is a native executable, so it receives a multi-line argument intact.
 - **Process Tree Cleanup**: On Windows, child processes spawned by agent wrappers can keep standard I/O pipes open after a timeout. On timeout, `orchestra` executes `taskkill /PID <pid> /T /F` to terminate the entire process tree. On macOS and Linux, the agent runs in its own process group and that whole group is killed.
 
 ## License
