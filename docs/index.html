@@ -886,7 +886,7 @@ The issue is now completely resolved.</span>
             <div class="pipeline-content">
               <h3 class="pipeline-name">Provider Flag Synthesis</h3>
               <p class="pipeline-desc">
-                Refuses the calling agent and any agent already in the delegation chain, then translates universal options into provider-specific syntax for <code>claude</code>, <code>agy</code>, <code>pi</code>, or <code>opencode</code>. On Windows, multi-line prompts are automatically staged as files to prevent <code>cmd.exe</code> from cutting arguments at the first newline.
+                Refuses the calling agent and any agent already in the delegation chain, then translates universal options into provider-specific syntax for <code>claude</code>, <code>agy</code>, <code>pi</code>, <code>opencode</code>, <code>qoder</code>, or <code>kiro-cli</code>. On Windows, a multi-line prompt is staged as a file only when the provider resolves to a <code>cmd.exe</code> shim, which would otherwise cut the argument at the first newline.
               </p>
             </div>
           </div>
@@ -1058,7 +1058,7 @@ The issue is now completely resolved.</span>
               <span class="provider-cmd">pi -p "&lt;prompt&gt;"</span>
             </div>
             <p class="provider-body">
-              Supports model selection, API provider targeting, JSON mode, and ephemeral sessions. Multi-line prompts on Windows are attached as temporary markdown files.
+              Supports model selection, API provider targeting, JSON mode, and ephemeral sessions. A multi-line prompt is attached as a temporary file only when the provider resolves to a <code>.cmd</code>/<code>.bat</code> shim on Windows, which also applies to <code>opencode</code> and <code>qoder</code>; a native executable receives the prompt intact.
             </p>
             <div class="provider-flags">
               <span class="flag-pill">--model &lt;id&gt;</span>
@@ -1089,13 +1089,46 @@ The issue is now completely resolved.</span>
 
           <div class="provider-panel">
             <div class="provider-header">
-              <h3 class="provider-title">Freebuff</h3>
-              <span class="provider-cmd" style="color: var(--danger); border-color: var(--danger-border); background-color: var(--danger-dim);">Not Supported</span>
+              <h3 class="provider-title">Qoder CLI</h3>
+              <span class="provider-cmd">qodercli -p "&lt;prompt&gt;"</span>
             </div>
             <p class="provider-body">
-              <code>freebuff</code> is strictly an interactive terminal user interface (TUI) and does not provide a non-interactive command line interface. It cannot be automated with <code>orchestra</code>.
+              Print mode, running with <code>accept_edits</code> permission by default, so file edits go through without a prompt. <code>--effort</code> maps to <code>--reasoning-effort</code>.
             </p>
+            <div class="provider-flags">
+              <span class="flag-pill">--exec-mode {accept-edits,auto,plan}</span>
+              <span class="flag-pill">--effort {low..max}</span>
+              <span class="flag-pill">--output {text,json}</span>
+              <span class="flag-pill">--dangerous</span>
+              <span class="flag-pill">--no-session</span>
+            </div>
+            <div class="provider-warning">
+              <strong>Caveat:</strong> Qoder has no plan mode. <code>--exec-mode plan</code> maps to its <code>default</code> mode, which asks before every write, so the run analyses and plans without editing.
+            </div>
           </div>
+
+          <div class="provider-panel">
+            <div class="provider-header">
+              <h3 class="provider-title">Kiro CLI</h3>
+              <span class="provider-cmd">kiro-cli chat --no-interactive "&lt;prompt&gt;"</span>
+            </div>
+            <p class="provider-body">
+              Trusted tools default to <code>fs_read</code>, <code>fs_write</code>, and <code>str_replace</code>, so it reads and edits files inside <code>--workdir</code> but has no shell. <code>--output json</code> passes <code>--output-format stream-json</code>.
+            </p>
+            <div class="provider-flags">
+              <span class="flag-pill">--effort {low..max}</span>
+              <span class="flag-pill">--output json</span>
+              <span class="flag-pill">--dangerous</span>
+            </div>
+            <div class="provider-warning">
+              <strong>Requirement:</strong> Needs <code>kiro-cli login</code> first (check with <code>kiro-cli whoami</code>). Without a shell, use <code>--verify</code> to run tests; <code>--dangerous</code> maps to <code>--trust-all-tools</code>, which lets it run any shell command unconfirmed.
+            </div>
+          </div>
+
+          <!-- <div class="provider-warning">
+            <strong>Not supported:</strong> <code>freebuff</code> is an interactive terminal UI with no prompt argument or headless mode, so <code>orchestra</code> cannot delegate to it. Run it yourself in a terminal instead.
+          </div> -->
+
         </div>
       </div>
     </section>

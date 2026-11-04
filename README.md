@@ -160,7 +160,7 @@ These flags are available across all providers:
 
 #### Qoder CLI (`qoder`, runs `qodercli`)
 
-Runs `qodercli -p` (print mode). The prompt is a positional argument, or is attached with `--attachment` when it is multi-line on Windows.
+Runs `qodercli -p` (print mode). The prompt is a positional argument, or is attached with `--attachment` when the CLI is a Windows batch shim and the prompt is multi-line.
 
 | Flag | Values | Description |
 |---|---|---|
@@ -289,7 +289,7 @@ When integrating coding agents into automated workflows, shell scripts, or super
 - **OpenCode Agent Requirement**: When using `opencode`, `orchestra` defaults to `--agent orchestra`. This agent must exist at `~/.config/opencode/agents/orchestra.md`. `python install.py` puts it there from `opencode/agents/orchestra.md`. It allows reading and editing files inside `--workdir` but no shell, so use `--verify` to run tests.
 - **Antigravity (`agy`) `accept-edits` Mode**: `agy --exec-mode accept-edits` has been observed to do nothing when a task needs new files created.
 - **Python Version**: Python 3.10+ is required due to modern union type annotations (`str | None`).
-- **Windows Multi-Line Prompts**: On Windows, `cmd.exe` truncates command arguments at the first newline character. When invoking `pi`, `opencode`, or `qoder` with multi-line prompts on Windows (`claude` receives its prompt on stdin instead), `orchestra` automatically writes the prompt to a temporary file and attaches it via `--file`, `@file`, or `--attachment`. `kiro-cli` is a native executable, so it receives a multi-line argument intact.
+- **Multi-Line Prompts on Windows**: When a provider is a `.cmd`/`.bat` shim, Windows runs it through `cmd.exe`, which truncates arguments at the first newline. In that case `orchestra` writes a multi-line prompt to a temporary file and attaches it (`pi`, `opencode`, `qoder`). The check uses the resolved file, so a native `.exe` such as `qodercli.exe` or `kiro-cli` receives the prompt intact, and `claude` always gets its prompt on stdin.
 - **Process Tree Cleanup**: On Windows, child processes spawned by agent wrappers can keep standard I/O pipes open after a timeout. On timeout, `orchestra` executes `taskkill /PID <pid> /T /F` to terminate the entire process tree. On macOS and Linux, the agent runs in its own process group and that whole group is killed.
 
 ## License

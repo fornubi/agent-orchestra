@@ -23,9 +23,12 @@ import argparse
 import os
 import pathlib
 import shutil
+import subprocess
 import sys
 
 REPO = pathlib.Path(__file__).resolve().parent
+# Directories (under the home folder) whose skills/ subfolder holds agent-orchestra/SKILL.md
+SKILL_ROOTS = (".claude", ".agents")
 
 
 def install(target: pathlib.Path, content: str, force: bool) -> bool:
@@ -43,11 +46,29 @@ def install(target: pathlib.Path, content: str, force: bool) -> bool:
     return True
 
 
+def runs_310(name: str) -> bool:
+    """True if `name` starts and is Python 3.10+. Windows' `python3` is often a Store stub that exits non-zero."""
+    try:
+        probe = subprocess.run([name, "-c", "import sys; raise SystemExit(sys.version_info < (3, 10))"],
+                               capture_output=True, timeout=15)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return probe.returncode == 0
+
+
 def python_command() -> str:
-    """The command agents should use. On Windows `python3` is often only a Store stub."""
-    if os.name != "nt" and shutil.which("python3"):
-        return "python3"
-    return "python"
+    """The command agents should type to run orchestra.py on this machine, on any OS."""
+    for name in ("python3", "python"):
+        if shutil.which(name) and runs_310(name):
+            return name
+    # Neither name works here: fall back to this interpreter, which is 3.10+ (checked in main)
+    exe = pathlib.Path(sys.executable).as_posix()
+    return f'"{exe}"' if " " in exe else exe
+
+
+def posix(path: pathlib.Path) -> str:
+    """Forward slashes: they work in bash, zsh, PowerShell and cmd, and need no escaping (Windows backslashes do)."""
+    return path.as_posix()
 
 
 def main() -> None:
@@ -60,11 +81,12 @@ def main() -> None:
 
     home = pathlib.Path.home()
     skill = (REPO / "skills" / "agent-orchestra" / "SKILL.md").read_text(encoding="utf-8")
-    skill = (skill.replace("{{ORCHESTRA_PY}}", str(REPO / "orchestra.py"))
-                  .replace("{{LOGS_DIR}}", str(REPO / "state" / "logs"))
+    skill = (skill.replace("{{ORCHESTRA_PY}}", posix(REPO / "orchestra.py"))
+                  .replace("{{LOGS_DIR}}", posix(REPO / "state" / "logs"))
                   .replace("{{PYTHON}}", python_command()))
     ok = True
-    for root in (".claude", ".agents"):
+    # Skill folders of the agents that read the Agent Skills format; add one here to cover another agent
+    for root in SKILL_ROOTS:
         ok = install(home / root / "skills" / "agent-orchestra" / "SKILL.md", skill, args.force) and ok
 
     if shutil.which("opencode"):

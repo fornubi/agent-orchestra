@@ -65,6 +65,8 @@ QODER_MODES = {"accept-edits": "accept_edits", "auto": "auto", "plan": "default"
 # Tools Kiro may use unprompted: read and write files, but no shell (so it can't run tests itself).
 # str_replace is Kiro's in-place edit tool; without it, edits fail and whole files get rewritten.
 KIRO_TRUST_TOOLS = "fs_read,fs_write,str_replace"
+# Providers whose CLI can read the prompt from a file (build_cmd's prompt_path)
+ATTACHABLE_PROVIDERS = ("pi", "opencode", "qoder")
 
 # Directories never worth snapshotting (VCS, deps, caches, agent state)
 SKIP_DIRS = {".git", ".hg", ".svn", "node_modules", "__pycache__", ".venv", "venv",
@@ -462,13 +464,15 @@ def main() -> None:
     if not binary:
         sys.exit(f"error: {args.provider} not found in PATH")
 
-    # On Windows, pi/opencode are npm shell scripts and qoder is a batch dispatcher, all run
-    # via `cmd /c`, and cmd.exe cuts an argument at its first newline - a multi-line prompt
-    # would arrive as its first line only. Attach such prompts as a file instead.
-    # kiro-cli is a native executable, so it receives a multi-line argument intact.
+    # Windows runs a .cmd/.bat shim (npm scripts, batch dispatchers) only through cmd.exe, and
+    # cmd.exe cuts an argument at its first newline, so a multi-line prompt would arrive as its
+    # first line. Decide from the resolved file, not the OS name or the provider: a native .exe
+    # (or any executable on macOS/Linux) receives the argument intact.
+    # claude gets its prompt on stdin, and agy/kiro-cli take it as an argument, so only providers
+    # that can attach a prompt file are switched to one.
+    needs_cmd = os.name == "nt" and binary.lower().endswith((".cmd", ".bat"))
     prompt_path = None
-    uses_cmd_wrapper = os.name == "nt" and args.provider in ("claude", "pi", "opencode", "qoder")
-    if uses_cmd_wrapper and args.provider != "claude" and "\n" in args.prompt:
+    if needs_cmd and args.provider in ATTACHABLE_PROVIDERS and "\n" in args.prompt:
         if args.prompt_file:
             prompt_path = os.path.abspath(args.prompt_file)
         else:
@@ -477,9 +481,9 @@ def main() -> None:
                 f.write(args.prompt)
 
     cmd = build_cmd(args.provider, args.prompt, args, prompt_path)
-    if uses_cmd_wrapper:
-        cmd_wrap = shutil.which(f"{BINS[args.provider]}.cmd") or BINS[args.provider]
-        cmd = ["cmd", "/c", cmd_wrap] + cmd[1:]
+    cmd[0] = binary  # the resolved path, so the same command works for .exe, .cmd or a POSIX script
+    if needs_cmd:
+        cmd = ["cmd", "/c", *cmd]
 
     start = time.time()
     log_path = init_log(args.provider, cmd, workdir, prompt_path, args.prompt)
