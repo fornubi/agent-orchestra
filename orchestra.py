@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""Orchestra bridge: send prompts to external agents (claude/agy/pi/opencode).
+"""Orchestra bridge: send prompts to external agents (claude/agy/pi/opencode/qoder/kiro-cli).
 
 All CLIs support a non-interactive mode:
-  agy:      agy -p "<prompt>"          (Google Antigravity CLI)
-  pi:       pi  -p "<prompt>"          (Pi agent harness)
-  opencode: opencode run "<prompt>"    (OpenCode)
-  claude:   claude -p                  (Claude Code; prompt sent on stdin)
+  agy:      agy -p "<prompt>"                      (Google Antigravity CLI)
+  pi:       pi  -p "<prompt>"                      (Pi agent harness)
+  opencode: opencode run "<prompt>"                (OpenCode)
+  claude:   claude -p                              (Claude Code; prompt sent on stdin)
+  qoder:    qoder -p "<prompt>"                    (Qoder CLI)
+  kiro-cli: kiro-cli chat --no-interactive "<prompt>"  (Kiro CLI)
 
 An agent can never delegate to itself: the calling agent, and every agent earlier in a
 delegation chain, is left out of `providers` and refused with exit 6.
@@ -16,6 +18,8 @@ Usage:
   python orchestra.py agy "build feature X" [--exec-mode auto] [--effort high] [--dangerous]
   python orchestra.py pi  "build feature X" [--model anthropic/sonnet] [--output json] [--approve] [--no-session]
   python orchestra.py opencode "build feature X" [--model provider/model] [--agent build] [--output json] [--auto]
+  python orchestra.py qoder "build feature X" [--model sonnet] [--effort high] [--exec-mode auto] [--output json] [--no-session]
+  python orchestra.py kiro-cli "build feature X" [--model <name>] [--effort high] [--output json] [--dangerous]
   python orchestra.py pi  --prompt-file task.txt --workdir ./proj --expect-changes --verify "node --check app.js"
 
 After every run a report lists the files the agent created/modified/deleted in --workdir,
@@ -44,15 +48,23 @@ import tempfile
 import time
 import sys
 
-BINS = {"claude": "claude", "agy": "agy", "pi": "pi", "opencode": "opencode"}
+BINS = {"claude": "claude", "agy": "agy", "pi": "pi", "opencode": "opencode",
+        "qoder": "qoder", "kiro-cli": "kiro-cli"}
 
 # Variable each CLI sets for the commands it runs; used to recognise the calling agent
 CALLER_MARKERS = {"claude": "CLAUDECODE", "agy": "ANTIGRAVITY_AGENT",
-                  "pi": "PI_CODING_AGENT", "opencode": "OPENCODE"}
+                  "pi": "PI_CODING_AGENT", "opencode": "OPENCODE",
+                  "qoder": "QODER_CLI", "kiro-cli": "KIRO_SESSION_ID"}
 # Comma-separated agents already in this delegation, passed down to each delegated agent
 CHAIN_ENV = "ORCHESTRA_CHAIN"
 # Claude's names for --exec-mode. It needs acceptEdits to write files in print mode.
 CLAUDE_MODES = {"accept-edits": "acceptEdits", "auto": "auto", "plan": "plan"}
+# Qoder's names for --exec-mode. It has no plan mode; "default" asks before every write,
+# which print mode can never answer, so it plans and analyses without editing.
+QODER_MODES = {"accept-edits": "accept_edits", "auto": "auto", "plan": "default"}
+# Tools Kiro may use unprompted: read and write files, but no shell (so it can't run tests itself).
+# str_replace is Kiro's in-place edit tool; without it, edits fail and whole files get rewritten.
+KIRO_TRUST_TOOLS = "fs_read,fs_write,str_replace"
 
 # Directories never worth snapshotting (VCS, deps, caches, agent state)
 SKIP_DIRS = {".git", ".hg", ".svn", "node_modules", "__pycache__", ".venv", "venv",
@@ -98,7 +110,7 @@ ATTACHED_PROMPT_MESSAGE = "Your full task is in the attached file. Read all of i
 
 def build_cmd(provider: str, prompt: str, args: argparse.Namespace,
               prompt_path: str | None = None) -> list[str]:
-    """prompt_path: when set (pi/opencode only), the prompt is attached as a file
+    """prompt_path: when set (pi/opencode/qoder only), the prompt is attached as a file
     instead of passed as an argument."""
     if provider == "claude":  # the prompt goes on stdin
         cmd = ["claude", "-p", "--permission-mode", CLAUDE_MODES[args.exec_mode or "accept-edits"]]
@@ -132,6 +144,33 @@ def build_cmd(provider: str, prompt: str, args: argparse.Namespace,
             cmd += ["--file", prompt_path, "--", ATTACHED_PROMPT_MESSAGE]
         else:
             cmd += ["--", prompt]
+    elif provider == "qoder":
+        cmd = ["qoder", "-p", "--permission-mode", QODER_MODES[args.exec_mode or "accept-edits"]]
+        if args.model:
+            cmd += ["--model", args.model]
+        if args.effort:
+            cmd += ["--reasoning-effort", args.effort]
+        if args.output:
+            cmd += ["--output-format", args.output]
+        if args.dangerous:
+            cmd += ["--dangerously-skip-permissions"]
+        if args.no_session:
+            cmd += ["--no-session-persistence"]
+        if prompt_path:
+            cmd += ["--attachment", prompt_path, ATTACHED_PROMPT_MESSAGE]
+        else:
+            cmd += [prompt]
+    elif provider == "kiro-cli":
+        cmd = ["kiro-cli", "chat", "--no-interactive"]
+        if args.model:
+            cmd += ["--model", args.model]
+        if args.effort:
+            cmd += ["--effort", args.effort]
+        if args.output == "json":
+            cmd += ["--output-format", "stream-json"]
+        # Read and write files only; --dangerous lets it run shell commands too
+        cmd += ["--trust-all-tools"] if args.dangerous else ["--trust-tools", KIRO_TRUST_TOOLS]
+        cmd += [prompt]
     else:  # pi
         cmd = ["pi", "-p"]
         if args.model:
@@ -372,20 +411,20 @@ def main() -> None:
     ap.add_argument("--provider", dest="api_provider",
                     help="pi only: provider name for --model")
     ap.add_argument("--effort", choices=["low", "medium", "high", "xhigh", "max"],
-                    help="claude/agy: reasoning effort")
+                    help="claude/agy/qoder/kiro-cli: reasoning effort")
     ap.add_argument("--exec-mode", choices=["accept-edits", "auto", "plan"],
-                    help="claude/agy: execution mode (claude default: accept-edits)")
+                    help="claude/agy/qoder: execution mode (claude/qoder default: accept-edits)")
     ap.add_argument("--output", choices=["text", "json"],
-                    help="claude/pi/opencode: output format")
+                    help="claude/pi/opencode/qoder/kiro-cli: output format")
     ap.add_argument("--dangerous", action="store_true",
-                    help="agy only: auto-approve all tool permissions")
+                    help="agy/qoder/kiro-cli: auto-approve all tool permissions")
     ap.add_argument("--approve", action="store_true",
                     help="pi only: trust project-local files")
     ap.add_argument("--auto", action="store_true",
                     help="opencode only: auto-approve permissions that are not explicitly denied")
     ap.add_argument("--agent", help="opencode only: agent to use (default: orchestra)")
     ap.add_argument("--no-session", action="store_true",
-                    help="pi only: don't save session (ephemeral)")
+                    help="pi/qoder: don't save session (ephemeral)")
     ap.add_argument("--caller",
                     help="name of the calling agent, replacing detection from the environment")
     ap.add_argument("--workdir", default=os.getcwd(),
@@ -423,11 +462,12 @@ def main() -> None:
     if not binary:
         sys.exit(f"error: {args.provider} not found in PATH")
 
-    # On Windows, pi/opencode are npm shell scripts run via `cmd /c`, and cmd.exe
-    # cuts an argument at its first newline - a multi-line prompt would arrive as
-    # its first line only. Attach such prompts as a file instead.
+    # On Windows, pi/opencode are npm shell scripts and qoder is a batch dispatcher, all run
+    # via `cmd /c`, and cmd.exe cuts an argument at its first newline - a multi-line prompt
+    # would arrive as its first line only. Attach such prompts as a file instead.
+    # kiro-cli is a native executable, so it receives a multi-line argument intact.
     prompt_path = None
-    uses_cmd_wrapper = os.name == "nt" and args.provider in ("claude", "pi", "opencode")
+    uses_cmd_wrapper = os.name == "nt" and args.provider in ("claude", "pi", "opencode", "qoder")
     if uses_cmd_wrapper and args.provider != "claude" and "\n" in args.prompt:
         if args.prompt_file:
             prompt_path = os.path.abspath(args.prompt_file)

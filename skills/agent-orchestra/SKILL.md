@@ -1,9 +1,9 @@
 ---
 name: agent-orchestra
-description: Bridge to external coding agents claude (Claude Code), agy (Google Antigravity CLI), pi (Pi agent harness) and opencode (OpenCode). Use when the user asks you to delegate work to other agents/providers, or to do a build + review loop where another agent builds and you review. Invokes orchestra.py. freebuff is interactive-only and cannot be delegated to.
+description: Bridge to external coding agents claude (Claude Code), agy (Google Antigravity CLI), pi (Pi agent harness), opencode (OpenCode), qoder (Qoder CLI) and kiro-cli (Kiro CLI). Use when the user asks you to delegate work to other agents/providers, or to do a build + review loop where another agent builds and you review. Invokes orchestra.py. freebuff is interactive-only and cannot be delegated to.
 ---
 
-# Agent Orchestra — claude, agy, pi & opencode bridge
+# Agent Orchestra — claude, agy, pi, opencode, qoder & kiro-cli bridge
 
 Send prompts to external CLI agents from any agent that can run shell commands. All run non-interactively and return stdout as the result.
 
@@ -21,6 +21,8 @@ Send prompts to external CLI agents from any agent that can run shell commands. 
 {{PYTHON}} orchestra.py agy "<prompt>" [--exec-mode auto] [--effort high] [--dangerous]
 {{PYTHON}} orchestra.py pi  "<prompt>" [--model <pattern>] [--output json] [--approve] [--no-session]
 {{PYTHON}} orchestra.py opencode "<prompt>" [--model provider/model] [--agent <name>] [--output json]
+{{PYTHON}} orchestra.py qoder "<prompt>" [--model <name>] [--effort high] [--exec-mode auto] [--output json] [--no-session]
+{{PYTHON}} orchestra.py kiro-cli "<prompt>" [--model <name>] [--effort high] [--output json]
 
 # common to all
   --prompt-file <path>   read the prompt from a file (prefer this for long prompts)
@@ -36,6 +38,8 @@ Send prompts to external CLI agents from any agent that can run shell commands. 
 - **agy**: Google Antigravity CLI. `-p` print mode. Default mode can already create and edit files, so **don't pass `--dangerous`**. `--effort` low|medium|high|xhigh|max. Observed: `--exec-mode accept-edits` can edit existing files but silently does nothing when the task needs new files/directories.
 - **pi**: Pi agent harness. Uses its default dynamic model; only pass `--model`/`--provider` when a specific model is required. `--no-session` keeps runs ephemeral. File writes work with `--approve`. Observed: may ignore structural requirements in the spec and still report success, so always verify.
 - **opencode**: OpenCode, via `opencode run`. Uses its configured default model; `--model` takes `provider/model`. The bridge runs the `orchestra` agent by default (`~/.config/opencode/agents/orchestra.md`, installed by `install.py`): deny-by-default, allows read/search and file edits inside `--workdir` only, **no shell** (so it can't run tests itself; use `--verify`). Don't pass `--auto`, and don't pick another `--agent` for build tasks: an agent whose permissions resolve to "ask" has every write rejected in a non-interactive run. `--output json` maps to `--format json`.
+- **qoder**: Qoder CLI, via `qoder -p`. Runs with `--permission-mode accept_edits` unless `--exec-mode` says otherwise, so it can edit files. `--exec-mode plan` maps to qoder's `default` mode, which asks before every write and so analyses without editing (it exits 0 and says the write was blocked — that is expected, not a hang). `--effort` maps to `--reasoning-effort`, `--output json` to `--output-format json`. `--no-session` keeps runs ephemeral. Don't pass `--dangerous`. On Windows a multi-line prompt is attached as a file via `--attachment`, because `qoder` is a batch dispatcher.
+- **kiro-cli**: Kiro CLI, via `kiro-cli chat --no-interactive`. Trusted tools default to `fs_read,fs_write,str_replace`: it reads and edits files inside `--workdir` but has **no shell** (so it can't run tests itself; use `--verify`). `str_replace` is its in-place edit tool — without it every edit fails and it rewrites whole files instead. `--effort` low|medium|high|xhigh|max. `--output json` maps to `--output-format stream-json`, a verbose ACP event stream; leave it off unless you need it. Needs `kiro-cli login` first (check with `kiro-cli whoami`). Its `[INFO]`/`[ERROR]` startup logs are printed on stdout ahead of the answer. Don't pass `--dangerous`: it maps to `--trust-all-tools`, which lets it run any shell command unconfirmed.
 - **freebuff**: **not supported** — it is an interactive TUI only, with no prompt argument or headless mode. Don't try to delegate to it; tell the user to run it themselves in a terminal if they want it.
 
 Claude Code only: its auto-mode classifier blocks `--dangerous` (as "Create Unsafe Agents", even with a Bash allow rule) and opencode `--auto`, but allows pi `--approve`.
